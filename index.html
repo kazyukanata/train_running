@@ -1,0 +1,1712 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>山手線 車内タイムアタック 3D</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --jy: #80c241;
+            --lcd: #0b0e12;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none;
+            font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", Meiryo, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background-color: #000;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* レンズ周辺の減光（ビネット） */
+        #vignette {
+            position: absolute;
+            inset: 0;
+            z-index: 3;
+            pointer-events: none;
+            background: radial-gradient(ellipse at center, rgba(0,0,0,0) 58%, rgba(0,0,0,0.42) 100%);
+        }
+
+        /* 接触時の赤フラッシュ（body に stunned-overlay が付く） */
+        #damage-vignette {
+            position: absolute;
+            inset: 0;
+            z-index: 4;
+            pointer-events: none;
+            opacity: 0;
+            background: radial-gradient(ellipse at center, rgba(239,68,68,0) 40%, rgba(239,68,68,0.55) 100%);
+            transition: opacity 0.15s;
+        }
+        body.stunned-overlay #damage-vignette {
+            opacity: 1;
+            animation: stunPulse 0.5s infinite alternate;
+        }
+        @keyframes stunPulse {
+            from { filter: brightness(0.8); }
+            to   { filter: brightness(1.4); }
+        }
+
+        /* バーチャルジョイスティック */
+        .joystick-zone {
+            position: absolute;
+            bottom: calc(25px + env(safe-area-inset-bottom, 0px));
+            left: 25px;
+            width: 130px;
+            height: 130px;
+            background: radial-gradient(circle at 50% 40%, rgba(255,255,255,0.14), rgba(20,24,30,0.35));
+            border: 2px solid rgba(255, 255, 255, 0.28);
+            border-radius: 50%;
+            z-index: 10;
+            backdrop-filter: blur(4px);
+            touch-action: none;
+        }
+
+        .joystick-knob {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 52px;
+            height: 52px;
+            background: radial-gradient(circle at 35% 30%, #ffffff, #c9ced4 55%, #8f959c);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.45), inset 0 -2px 4px rgba(0,0,0,0.25);
+            pointer-events: none;
+        }
+
+        /* 視点回転エリア */
+        #touch-look-zone {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 60%;
+            height: 100%;
+            z-index: 5;
+            touch-action: none;
+        }
+
+        /* 車内案内表示器風 HUD */
+        .lcd-panel {
+            background: linear-gradient(180deg, #14181d, var(--lcd));
+            border: 1px solid #2b323b;
+            border-top: 4px solid var(--jy);
+            border-radius: 10px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.04);
+        }
+        .lcd-digits {
+            font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 0.04em;
+            text-shadow: 0 0 8px rgba(255, 255, 255, 0.35);
+        }
+        .jy-badge {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            border: 4px solid var(--jy);
+            background: #fff;
+            color: #111;
+            font-weight: 900;
+            font-size: 14px;
+            line-height: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .jy-badge.large {
+            width: 64px;
+            height: 64px;
+            border-width: 6px;
+            font-size: 22px;
+        }
+
+        /* 駅名標風のカード */
+        .station-sign {
+            background: #f5f5f0;
+            color: #16181b;
+            border-radius: 18px;
+            overflow: hidden;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+        }
+        .station-sign .band-top    { height: 14px; background: var(--jy); }
+        .station-sign .band-bottom { height: 8px;  background: var(--jy); }
+    </style>
+</head>
+<body class="text-white">
+
+    <!-- 3D Canvas -->
+    <div id="canvas-container"></div>
+    <div id="vignette"></div>
+    <div id="damage-vignette"></div>
+
+    <!-- タッチ視点操作エリア -->
+    <div id="touch-look-zone"></div>
+
+    <!-- HUD -->
+    <div class="absolute left-4 right-4 z-10 flex justify-between items-start pointer-events-none" style="top: calc(16px + env(safe-area-inset-top, 0px));">
+        <!-- タイム＆車両表示（車内案内表示器風） -->
+        <div class="lcd-panel px-3 py-2 flex items-center gap-3">
+            <div class="jy-badge">JY</div>
+            <div>
+                <div class="text-[11px] font-bold tracking-wide" style="color: var(--jy);">山手線 タイムアタック</div>
+                <div id="timer-display" class="lcd-digits text-2xl font-black text-white leading-tight">00:00.00</div>
+                <div id="car-display" class="text-[11px] text-gray-300">1号車 / 5両（先頭車）</div>
+            </div>
+        </div>
+
+        <!-- 警告／スタン表示 -->
+        <div id="stun-banner" class="hidden bg-red-600/95 text-white px-4 py-2 rounded-xl font-bold animate-bounce shadow-lg flex items-center gap-2 border border-red-300/40">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            <span id="stun-text">接触！動けない！</span>
+        </div>
+    </div>
+
+    <!-- ジョイスティック -->
+    <div id="joystick-zone" class="joystick-zone">
+        <div id="joystick-knob" class="joystick-knob"></div>
+    </div>
+
+    <!-- 傾き警告インジケーター -->
+    <div id="tilt-warning" class="absolute right-6 z-10 lcd-panel px-3 py-1.5 text-xs text-amber-300 pointer-events-none flex items-center gap-2 transition-opacity opacity-0" style="bottom: calc(24px + env(safe-area-inset-bottom, 0px)); border-top-color: #f59e0b;">
+        <i class="fa-solid fa-arrows-left-right animate-pulse"></i>
+        <span>電車が傾いています！</span>
+    </div>
+
+    <!-- スタート画面 modal（駅名標風） -->
+    <div id="start-modal" class="absolute inset-0 z-20 bg-black/75 backdrop-blur-md flex flex-col justify-center items-center p-6 text-center">
+        <div class="max-w-md w-full station-sign">
+            <div class="band-top"></div>
+            <div class="p-6 space-y-4">
+                <div class="flex items-center justify-center gap-4">
+                    <div class="jy-badge large">JY</div>
+                    <div class="text-left">
+                        <h1 class="text-2xl font-black leading-tight">山手線<br>車内走破レース</h1>
+                        <div class="text-[11px] text-gray-500 mt-1">Yamanote Line · Train Time Attack</div>
+                    </div>
+                </div>
+                <p class="text-xs text-gray-600 leading-relaxed">
+                    先頭車両の運転席からスタートし、揺れる車内をくぐり抜けて<br>
+                    <span class="font-bold" style="color:#4d8a1f;">一番後ろ（5号車）の運転席</span>を目指せ！
+                </p>
+
+                <!-- 障害物説明 -->
+                <div class="bg-white rounded-xl p-3 text-left text-xs space-y-2 border border-gray-300">
+                    <div class="font-bold text-gray-500 border-b border-gray-200 pb-1">ペナルティ（硬直時間）</div>
+                    <div class="flex items-center justify-between">
+                        <span class="flex items-center gap-2"><i class="fa-solid fa-chair text-emerald-700 w-4 text-center"></i> 座席・椅子</span>
+                        <span class="text-red-600 font-bold">3秒停止</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="flex items-center gap-2"><i class="fa-solid fa-user text-blue-700 w-4 text-center"></i> 乗客</span>
+                        <span class="text-red-600 font-bold">2秒停止</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <span class="flex items-center gap-2"><i class="fa-solid fa-door-closed text-slate-600 w-4 text-center"></i> ドア・壁</span>
+                        <span class="text-red-600 font-bold">5秒停止</span>
+                    </div>
+                </div>
+
+                <button id="start-btn" class="w-full py-4 active:scale-95 transition-all font-black text-lg rounded-2xl shadow-lg" style="background: var(--jy); color: #11200a;">
+                    ゲームスタート
+                </button>
+            </div>
+            <div class="band-bottom"></div>
+        </div>
+    </div>
+
+    <!-- リザルト画面 modal -->
+    <div id="result-modal" class="hidden absolute inset-0 z-20 bg-black/85 backdrop-blur-md flex flex-col justify-center items-center p-6 text-center">
+        <div class="max-w-md w-full station-sign">
+            <div class="band-top"></div>
+            <div class="p-6 space-y-4">
+                <div class="inline-block p-4 rounded-full" style="background: rgba(128,194,65,0.18); border: 2px solid var(--jy);">
+                    <i class="fa-solid fa-trophy text-4xl text-amber-500"></i>
+                </div>
+                <h2 class="text-2xl font-black">ゴール到達！</h2>
+                <div class="lcd-panel p-4">
+                    <div class="text-xs text-gray-400 mb-1">クリアタイム</div>
+                    <div id="final-time" class="lcd-digits text-4xl font-black" style="color: var(--jy);">00:00.00</div>
+                </div>
+                <button id="restart-btn" class="w-full py-4 active:scale-95 transition-all font-black text-lg rounded-2xl shadow-lg" style="background: var(--jy); color: #11200a;">
+                    もう一度挑戦
+                </button>
+            </div>
+            <div class="band-bottom"></div>
+        </div>
+    </div>
+
+    <!-- ゲームロジック -->
+    <script>
+        // --- ゲーム状態管理 ---
+        const GAME_STATE = {
+            START: 0,
+            PLAYING: 1,
+            GAMEOVER: 2
+        };
+        let currentState = GAME_STATE.START;
+
+        let startTime = 0;
+        let elapsedTime = 0;
+        let stunEndTime = 0;
+        let isStunned = false;
+
+        // 電車構成パラメータ
+        const CAR_COUNT = 5;
+        const CAR_LENGTH = 16; // 車両1つの長さ (Z軸)
+        const CAR_WIDTH = 3.6;  // 車内幅
+        const CAR_HEIGHT = 2.5; // 車内高さ
+        const TOTAL_LENGTH = CAR_COUNT * CAR_LENGTH;
+
+        // 見た目の調整用パラメータ（明るさなどはここで調整できます）
+        const LOOK = {
+            exposure: 1.0,        // 全体の露出
+            hemi: 0.35,           // 環境光の強さ
+            envIntensity: 0.7,    // 反射・環境マップの強さ
+            pointLight: 0.8,      // プレイヤー周辺を照らす灯りの強さ
+            fogColor: 0x15181d,
+            fogDensity: 0.013
+        };
+        const JY_GREEN = 0x80c241; // 山手線のラインカラー
+        const JP_FONT = '"Hiragino Sans","Noto Sans JP","Yu Gothic",Meiryo,sans-serif';
+
+        // 障害物データ保持
+        const obstacles = [];
+
+        // 電車の傾き
+        let trainTilt = 0; // 現在の傾き角度 (ラジアン)
+        let targetTilt = 0;
+        let tiltTimer = 0;
+
+        // Three.js 変数
+        let scene, camera, renderer;
+        let playerGroup, playerBody, playerRig;
+        let trainGroup, lightRig;
+        let outsideLayers = [];
+        let HAS_ENV = false;
+        let lastFrame = 0;
+        let walkPhase = 0;
+        let playerFacing = Math.PI;
+
+        // プレイヤー移動制御
+        const player = {
+            x: 0,
+            z: CAR_LENGTH / 2 - 2, // 1号車の先端付近からスタート
+            speed: 0.08,
+            radius: 0.35,
+            rotationY: Math.PI // 最初は後ろ（Z軸マイナス方向＝最後尾）を向く
+        };
+
+        // タッチ / ジョイスティック入力状態
+        const input = {
+            moveX: 0,
+            moveY: 0,
+            touchLookId: null,
+            lastTouchX: 0,
+            lastTouchY: 0
+        };
+
+        // 山手線 全30駅（JY01〜JY30）
+        const STATIONS = [
+            ['東京','Tokyo'],['神田','Kanda'],['秋葉原','Akihabara'],['御徒町','Okachimachi'],['上野','Ueno'],
+            ['鶯谷','Uguisudani'],['日暮里','Nippori'],['西日暮里','Nishi-Nippori'],['田端','Tabata'],['駒込','Komagome'],
+            ['巣鴨','Sugamo'],['大塚','Otsuka'],['池袋','Ikebukuro'],['目白','Mejiro'],['高田馬場','Takadanobaba'],
+            ['新大久保','Shin-Okubo'],['新宿','Shinjuku'],['代々木','Yoyogi'],['原宿','Harajuku'],['渋谷','Shibuya'],
+            ['恵比寿','Ebisu'],['目黒','Meguro'],['五反田','Gotanda'],['大崎','Osaki'],['品川','Shinagawa'],
+            ['高輪ゲートウェイ','Takanawa Gateway'],['田町','Tamachi'],['浜松町','Hamamatsucho'],['新橋','Shimbashi'],['有楽町','Yurakucho']
+        ];
+
+        // --- 初期化 ---
+        window.onload = function() {
+            initThree();
+            setupUIAndInputs();
+            animate();
+        };
+
+        // =====================================================
+        //  ユーティリティ（色・テクスチャ・ジオメトリ・マテリアル）
+        // =====================================================
+        function srgb(hex) {
+            return new THREE.Color(hex).convertSRGBToLinear();
+        }
+
+        function pick(arr) {
+            return arr[Math.floor(Math.random() * arr.length)];
+        }
+
+        function canvasTex(w, h, draw, opts) {
+            opts = opts || {};
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            const g = c.getContext('2d');
+            draw(g, w, h);
+            const t = new THREE.CanvasTexture(c);
+            t.encoding = THREE.sRGBEncoding;
+            if (opts.repeat) {
+                t.wrapS = t.wrapT = THREE.RepeatWrapping;
+                t.repeat.set(opts.repeat[0], opts.repeat[1]);
+            }
+            t.anisotropy = renderer ? Math.min(4, renderer.capabilities.getMaxAnisotropy()) : 1;
+            return t;
+        }
+
+        function speckle(g, w, h, n, color, size) {
+            g.fillStyle = color;
+            for (let i = 0; i < n; i++) {
+                g.fillRect(Math.random() * w, Math.random() * h, size, size);
+            }
+        }
+
+        function std(hex, rough, metal, extra) {
+            const m = new THREE.MeshStandardMaterial(Object.assign({
+                roughness: rough === undefined ? 0.7 : rough,
+                metalness: metal || 0,
+                envMapIntensity: LOOK.envIntensity
+            }, extra || {}));
+            m.color = srgb(hex);
+            return m;
+        }
+
+        const _stdCache = {};
+        function cstd(hex, rough, metal) {
+            const k = hex + '_' + rough + '_' + metal;
+            return _stdCache[k] || (_stdCache[k] = std(hex, rough, metal));
+        }
+
+        function basic(hex, extra) {
+            const m = new THREE.MeshBasicMaterial(extra || {});
+            m.color = srgb(hex);
+            return m;
+        }
+
+        // ジオメトリのキャッシュ
+        const _gc = {};
+        function boxG(w, h, d) {
+            const k = 'b' + w + ',' + h + ',' + d;
+            return _gc[k] || (_gc[k] = new THREE.BoxGeometry(w, h, d));
+        }
+        function cylG(rt, rb, h, s) {
+            const k = 'c' + rt + ',' + rb + ',' + h + ',' + s;
+            return _gc[k] || (_gc[k] = new THREE.CylinderGeometry(rt, rb, h, s));
+        }
+        function sphG(r, ws, hs) {
+            const k = 's' + r + ',' + ws + ',' + hs;
+            return _gc[k] || (_gc[k] = new THREE.SphereGeometry(r, ws, hs));
+        }
+
+        // メッシュを作って親に追加するヘルパー
+        function put(parent, geo, mat, pos, rot, scl) {
+            const m = new THREE.Mesh(geo, mat);
+            if (pos) m.position.set(pos[0], pos[1], pos[2]);
+            if (rot) m.rotation.set(rot[0], rot[1], rot[2]);
+            if (scl) m.scale.set(scl[0], scl[1], scl[2]);
+            parent.add(m);
+            return m;
+        }
+
+        // 静的メッシュをマテリアルごとに1つへ結合（描画負荷の削減）
+        function mergeGeos(geos) {
+            let vCount = 0, iCount = 0;
+            geos.forEach(g => {
+                vCount += g.attributes.position.count;
+                iCount += g.index ? g.index.count : g.attributes.position.count;
+            });
+            const pos = new Float32Array(vCount * 3);
+            const nor = new Float32Array(vCount * 3);
+            const uv = new Float32Array(vCount * 2);
+            const idx = vCount > 65535 ? new Uint32Array(iCount) : new Uint16Array(iCount);
+            let vo = 0, io = 0;
+            geos.forEach(g => {
+                const p = g.attributes.position, n = g.attributes.normal, u = g.attributes.uv;
+                pos.set(p.array, vo * 3);
+                if (n) nor.set(n.array, vo * 3);
+                if (u) uv.set(u.array, vo * 2);
+                if (g.index) {
+                    for (let i = 0; i < g.index.count; i++) idx[io + i] = g.index.array[i] + vo;
+                    io += g.index.count;
+                } else {
+                    for (let i = 0; i < p.count; i++) idx[io + i] = vo + i;
+                    io += p.count;
+                }
+                vo += p.count;
+            });
+            const m = new THREE.BufferGeometry();
+            m.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            m.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+            m.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+            m.setIndex(new THREE.BufferAttribute(idx, 1));
+            m.computeBoundingSphere();
+            return m;
+        }
+
+        function bakeStatic(root) {
+            root.updateMatrixWorld(true);
+            const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+            const buckets = new Map();
+            root.traverse(obj => {
+                if (!obj.isMesh) return;
+                let b = buckets.get(obj.material);
+                if (!b) { b = { mat: obj.material, geos: [] }; buckets.set(obj.material, b); }
+                const src = obj.geometry;
+                const g = new THREE.BufferGeometry();
+                g.setAttribute('position', src.attributes.position.clone());
+                g.setAttribute('normal', src.attributes.normal.clone());
+                g.setAttribute('uv', src.attributes.uv.clone());
+                if (src.index) g.setIndex(src.index.clone());
+                g.applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv, obj.matrixWorld));
+                b.geos.push(g);
+            });
+            const out = new THREE.Group();
+            buckets.forEach(b => {
+                const mesh = new THREE.Mesh(mergeGeos(b.geos), b.mat);
+                mesh.renderOrder = b.mat.transparent ? 2 : 0;
+                out.add(mesh);
+                b.geos.forEach(g => g.dispose());
+            });
+            return out;
+        }
+
+        // =====================================================
+        //  環境マップ（ステンレスなどの反射用）
+        // =====================================================
+        function makeEnvironment() {
+            try {
+                const c = document.createElement('canvas');
+                c.width = 512; c.height = 256;
+                const g = c.getContext('2d');
+                const grad = g.createLinearGradient(0, 0, 0, 256);
+                grad.addColorStop(0, '#f4f7ff');
+                grad.addColorStop(0.42, '#d7dce4');
+                grad.addColorStop(0.5, '#a9adb3');
+                grad.addColorStop(0.62, '#6c6f75');
+                grad.addColorStop(1, '#26282c');
+                g.fillStyle = grad;
+                g.fillRect(0, 0, 512, 256);
+                g.fillStyle = '#ffffff';
+                for (let i = 0; i < 8; i++) g.fillRect(i * 64 + 18, 40, 28, 12);
+                const tex = new THREE.CanvasTexture(c);
+                tex.mapping = THREE.EquirectangularReflectionMapping;
+                tex.encoding = THREE.sRGBEncoding;
+                const pmrem = new THREE.PMREMGenerator(renderer);
+                const env = pmrem.fromEquirectangular(tex).texture;
+                pmrem.dispose();
+                tex.dispose();
+                scene.environment = env;
+                return true;
+            } catch (e) {
+                console.warn('環境マップを作成できませんでした', e);
+                return false;
+            }
+        }
+
+        // =====================================================
+        //  テクスチャ生成
+        // =====================================================
+        function makeSeatTex(prioSlots) {
+            return canvasTex(1024, 128, (g, w, h) => {
+                const n = 7, sw = w / n;
+                for (let i = 0; i < n; i++) {
+                    const prio = i < prioSlots;
+                    const base = prio ? '#3b5b8f' : '#2f6e4b';
+                    const dot  = prio ? '#5577b0' : '#4c9468';
+                    g.fillStyle = base;
+                    g.fillRect(i * sw, 0, sw, h);
+                    g.fillStyle = dot;
+                    let row = 0;
+                    for (let y = 6; y < h; y += 14) {
+                        for (let x = i * sw + 6; x < (i + 1) * sw - 4; x += 14) {
+                            g.fillRect(x + (row % 2 ? 7 : 0), y, 4, 4);
+                        }
+                        row++;
+                    }
+                    g.fillStyle = 'rgba(0,0,0,0.35)';
+                    g.fillRect(i * sw - 1, 0, 3, h);
+                }
+                speckle(g, w, h, 3500, 'rgba(0,0,0,0.10)', 1.5);
+                speckle(g, w, h, 2500, 'rgba(255,255,255,0.07)', 1.5);
+            });
+        }
+
+        function makeAdTex(a) {
+            return canvasTex(520, 160, (g, w, h) => {
+                const grad = g.createLinearGradient(0, 0, w, h);
+                grad.addColorStop(0, a[0]);
+                grad.addColorStop(1, a[1]);
+                g.fillStyle = grad;
+                g.fillRect(0, 0, w, h);
+                g.fillStyle = 'rgba(255,255,255,0.35)';
+                g.beginPath(); g.arc(w - 70, 40, 90, 0, Math.PI * 2); g.fill();
+                g.fillStyle = '#1b1d21';
+                g.font = 'bold 40px ' + JP_FONT;
+                g.fillText(a[2], 24, 78);
+                g.font = '22px ' + JP_FONT;
+                g.fillText(a[3], 26, 122);
+            });
+        }
+
+        function makeLCDTex(idx) {
+            const st = STATIONS[idx];
+            return canvasTex(512, 128, (g, w, h) => {
+                g.fillStyle = '#07090c';
+                g.fillRect(0, 0, w, h);
+                g.fillStyle = '#80c241';
+                g.fillRect(0, 0, w, 10);
+                g.fillStyle = '#9aa3ad';
+                g.font = 'bold 26px ' + JP_FONT;
+                g.fillText('次は', 18, 58);
+                let fs = 58;
+                g.font = 'bold ' + fs + 'px ' + JP_FONT;
+                while (g.measureText(st[0]).width > 300 && fs > 24) {
+                    fs -= 2;
+                    g.font = 'bold ' + fs + 'px ' + JP_FONT;
+                }
+                g.fillStyle = '#ffffff';
+                g.fillText(st[0], 84, 78);
+                g.fillStyle = '#9aa3ad';
+                g.font = '24px ' + JP_FONT;
+                g.fillText('Next  ' + st[1], 20, 112);
+                // JY ナンバリング
+                g.beginPath();
+                g.arc(w - 62, 70, 40, 0, Math.PI * 2);
+                g.fillStyle = '#ffffff'; g.fill();
+                g.lineWidth = 7; g.strokeStyle = '#80c241'; g.stroke();
+                g.fillStyle = '#111';
+                g.textAlign = 'center';
+                g.font = 'bold 22px ' + JP_FONT;
+                g.fillText('JY', w - 62, 64);
+                g.font = 'bold 26px ' + JP_FONT;
+                g.fillText(String(idx + 1).padStart(2, '0'), w - 62, 92);
+            });
+        }
+
+        function makeSignTex(title, sub, bg, accent) {
+            return canvasTex(512, 128, (g, w, h) => {
+                g.fillStyle = bg;
+                g.fillRect(0, 0, w, h);
+                g.strokeStyle = accent;
+                g.lineWidth = 8;
+                g.strokeRect(4, 4, w - 8, h - 8);
+                g.fillStyle = '#ffffff';
+                g.textAlign = 'center';
+                g.font = 'bold 50px ' + JP_FONT;
+                g.fillText(title, w / 2, 62);
+                g.fillStyle = accent;
+                g.font = 'bold 26px ' + JP_FONT;
+                g.fillText(sub, w / 2, 102);
+            });
+        }
+
+        function makeCityTex(w, h) {
+            return canvasTex(w, h, (g) => {
+                const sky = g.createLinearGradient(0, 0, 0, h);
+                sky.addColorStop(0, '#070b1c');
+                sky.addColorStop(0.5, '#162247');
+                sky.addColorStop(0.78, '#3a3a63');
+                sky.addColorStop(1, '#14151f');
+                g.fillStyle = sky;
+                g.fillRect(0, 0, w, h);
+                const layers = [
+                    { base: h * 0.84, minH: 50, maxH: 190, col: '#1b1f38', lit: 0.12 },
+                    { base: h * 0.9,  minH: 40, maxH: 240, col: '#0e1224', lit: 0.22 }
+                ];
+                const lights = ['#ffd88a', '#ffe9b8', '#b7dcff', '#fff3d0'];
+                layers.forEach(L => {
+                    let x = 0;
+                    while (x < w) {
+                        const bw = 24 + Math.random() * 60;
+                        const bh = L.minH + Math.random() * (L.maxH - L.minH);
+                        g.fillStyle = L.col;
+                        g.fillRect(x, L.base - bh, bw, bh + (h - L.base));
+                        for (let wy = L.base - bh + 8; wy < L.base - 6; wy += 11) {
+                            for (let wx = x + 5; wx < x + bw - 6; wx += 9) {
+                                if (Math.random() < L.lit) {
+                                    g.fillStyle = pick(lights);
+                                    g.fillRect(wx, wy, 4, 6);
+                                }
+                            }
+                        }
+                        if (bh > 170 && Math.random() < 0.5) {
+                            g.fillStyle = '#ff4b4b';
+                            g.fillRect(x + bw / 2 - 2, L.base - bh - 6, 4, 4);
+                        }
+                        x += bw + Math.random() * 6;
+                    }
+                });
+                // 地上の灯り
+                for (let i = 0; i < 160; i++) {
+                    g.fillStyle = pick(['#ffcf7a', '#fff1c8', '#ff8a5c', '#9fd4ff']);
+                    g.fillRect(Math.random() * w, h * 0.9 + Math.random() * h * 0.1, 3, 2);
+                }
+            });
+        }
+
+        function makeNearTex(w, h) {
+            return canvasTex(w, h, (g) => {
+                g.clearRect(0, 0, w, h);
+                // 電柱と街灯
+                for (let i = 0; i < 5; i++) {
+                    const x = Math.random() * w;
+                    g.fillStyle = 'rgba(5,6,10,0.92)';
+                    g.fillRect(x, h * 0.12, 5, h * 0.88);
+                    g.fillRect(x - 14, h * 0.2, 33, 4);
+                }
+                for (let i = 0; i < 7; i++) {
+                    const x = Math.random() * w, y = h * (0.35 + Math.random() * 0.5);
+                    const gr = g.createRadialGradient(x, y, 0, x, y, 26);
+                    gr.addColorStop(0, 'rgba(255,230,170,0.95)');
+                    gr.addColorStop(0.3, 'rgba(255,200,120,0.35)');
+                    gr.addColorStop(1, 'rgba(255,200,120,0)');
+                    g.fillStyle = gr;
+                    g.fillRect(x - 26, y - 26, 52, 52);
+                }
+            });
+        }
+
+        // =====================================================
+        //  マテリアル一式
+        // =====================================================
+        const M = {};
+        function buildMaterials() {
+            M.wall   = std(0xe8e3d6, 0.6, 0);
+            M.floor  = std(0xffffff, 0.8, 0, {
+                map: canvasTex(512, 512, (g, w, h) => {
+                    g.fillStyle = '#8c8a85';
+                    g.fillRect(0, 0, w, h);
+                    speckle(g, w, h, 9000, 'rgba(0,0,0,0.12)', 2);
+                    speckle(g, w, h, 6000, 'rgba(255,255,255,0.10)', 2);
+                    g.strokeStyle = 'rgba(0,0,0,0.16)';
+                    g.lineWidth = 2;
+                    for (let x = 0; x <= w; x += 128) {
+                        g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke();
+                    }
+                }, { repeat: [CAR_WIDTH / 1.2, CAR_LENGTH / 1.2] })
+            });
+            M.ceiling = std(0xefece4, 0.85, 0);
+            M.vent = std(0xffffff, 0.7, 0, {
+                map: canvasTex(128, 64, (g, w, h) => {
+                    g.fillStyle = '#d9dbdd';
+                    g.fillRect(0, 0, w, h);
+                    g.fillStyle = 'rgba(40,44,50,0.55)';
+                    for (let y = 4; y < h; y += 8) g.fillRect(0, y, w, 2);
+                }, { repeat: [1, 30] })
+            });
+            M.led    = basic(0xfff4dc);
+            M.metal  = HAS_ENV ? std(0xd8dde2, 0.35, 0.9) : std(0xaab0b6, 0.4, 0.3);
+            M.frame  = HAS_ENV ? std(0xc9ccd0, 0.35, 0.8) : std(0xb8bcc2, 0.45, 0.3);
+            M.door   = HAS_ENV ? std(0xd7dadc, 0.4, 0.55) : std(0xc9cdd0, 0.5, 0.2);
+            M.doorDark = std(0x2a2d31, 0.6, 0);
+            M.glass  = std(0xbcd0e0, 0.05, 0, {
+                transparent: true, opacity: 0.1, depthWrite: false,
+                side: THREE.DoubleSide, envMapIntensity: 1.6
+            });
+            M.seatBase  = std(0x4b5057, 0.7, 0.1);
+            M.seatSolid = std(0x265c3e, 0.95, 0);
+            M.seatNormal = std(0xffffff, 0.95, 0, { map: makeSeatTex(0) });
+            M.seatPrio   = std(0xffffff, 0.95, 0, { map: makeSeatTex(3) });
+            M.stripe = std(JY_GREEN, 0.5, 0);
+            M.ring   = std(0xe6e6e0, 0.5, 0);
+            M.belt   = std(0x3a3d42, 0.6, 0.2);
+            M.ao = new THREE.MeshBasicMaterial({
+                map: canvasTex(128, 128, (g, w, h) => {
+                    const gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+                    gr.addColorStop(0, 'rgba(0,0,0,0.65)');
+                    gr.addColorStop(0.6, 'rgba(0,0,0,0.3)');
+                    gr.addColorStop(1, 'rgba(0,0,0,0)');
+                    g.clearRect(0, 0, w, h);
+                    g.fillStyle = gr;
+                    g.fillRect(0, 0, w, h);
+                }),
+                transparent: true, depthWrite: false,
+                polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
+            });
+            M.goalMat = new THREE.MeshBasicMaterial({
+                transparent: true, opacity: 0.4, depthWrite: false,
+                polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
+            });
+            M.goalMat.color = srgb(JY_GREEN);
+            M.jyGlow = basic(JY_GREEN, { toneMapped: false });
+            M.phoneScreen = basic(0xcfe8ff, { toneMapped: false });
+
+            // 中吊り・窓上ポスター
+            const adData = [
+                ['#ffe08a', '#ff9f6b', '春の小旅行へ。', '週末は、ちょっと遠くまで。'],
+                ['#bfe3ff', '#6fa8dc', '新生活、はじめよう。', '春の応援キャンペーン'],
+                ['#d9f2c4', '#8cc56a', 'お忘れ物にご注意ください', 'ご降車のさいは手荷物の確認を'],
+                ['#f6c6d8', '#e58aa9', '英会話 無料体験受付中', 'まずは気軽にお問い合わせ'],
+                ['#e4dcff', '#9d8ce0', '夜の美術館へ。', '特別展 開催中'],
+                ['#ffd9b0', '#f0a35a', '今日の一杯を、ゆっくり。', '駅前のカフェでひと休み']
+            ];
+            M.ads = adData.map(a => std(0xffffff, 0.7, 0, { map: makeAdTex(a) }));
+
+            // 車内案内表示器（15駅ぶん）
+            M.lcd = [];
+            for (let k = 0; k < 15; k++) {
+                M.lcd.push(new THREE.MeshBasicMaterial({ map: makeLCDTex((19 + k) % 30), toneMapped: false }));
+            }
+            M.signFront = new THREE.MeshBasicMaterial({ map: makeSignTex('乗務員室', '先頭車', '#1b1e23', '#9aa3ad'), toneMapped: false });
+            M.signGoal  = new THREE.MeshBasicMaterial({ map: makeSignTex('乗務員室', 'GOAL  5号車運転席', '#12331c', '#80c241'), toneMapped: false });
+            M.signCar = [];
+            for (let i = 2; i <= CAR_COUNT; i++) {
+                M.signCar.push(new THREE.MeshBasicMaterial({ map: makeSignTex(i + '号車', 'Car ' + i, '#1b1e23', '#80c241'), toneMapped: false }));
+            }
+        }
+
+        // =====================================================
+        //  3Dシーン構築
+        // =====================================================
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+
+            // シーン
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x05060a);
+            scene.fog = new THREE.FogExp2(0x000000, LOOK.fogDensity);
+            scene.fog.color = srgb(LOOK.fogColor);
+
+            // カメラ (三人称視点)
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 100);
+
+            // レンダラー
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = LOOK.exposure;
+            container.appendChild(renderer.domElement);
+
+            // 環境マップ（反射）
+            HAS_ENV = makeEnvironment();
+
+            // ライト設定：やわらかい環境光 ＋ プレイヤーに追従する車内灯
+            const hemi = new THREE.HemisphereLight(0xeef3ff, 0x8a8478, HAS_ENV ? LOOK.hemi : 0.85);
+            scene.add(hemi);
+
+            // 電車グループ（全体を傾けるため）
+            trainGroup = new THREE.Group();
+            scene.add(trainGroup);
+
+            lightRig = new THREE.Group();
+            [-4, 0, 4].forEach(dz => {
+                const pl = new THREE.PointLight(0xfff1dc, LOOK.pointLight, 11, 1.2);
+                pl.position.set(0, 2.2, dz);
+                lightRig.add(pl);
+            });
+            trainGroup.add(lightRig);
+
+            // ゴールを示す緑の灯り
+            const goalLight = new THREE.PointLight(JY_GREEN, 0.9, 9, 1.4);
+            goalLight.position.set(0, 1.9, -(CAR_COUNT - 1) * CAR_LENGTH - CAR_LENGTH / 2 + 2.2);
+            trainGroup.add(goalLight);
+
+            buildMaterials();
+
+            // 電車車内 & 障害物の作成
+            createTrainEnvironment();
+
+            // 窓の外の夜景
+            createOutside();
+
+            // プレイヤーアバター作成
+            createPlayer();
+
+            // ウィンドウリサイズ対応
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        // 壁（窓・ドアの開口つき）
+        function makeWallGeo(s) {
+            const half = CAR_LENGTH / 2, H = CAR_HEIGHT;
+            const shape = new THREE.Shape();
+            shape.moveTo(-half, 0); shape.lineTo(half, 0); shape.lineTo(half, H); shape.lineTo(-half, H); shape.lineTo(-half, 0);
+            const addHole = (cx, w, v0, v1) => {
+                const p = new THREE.Path();
+                p.moveTo(cx - w / 2, v0); p.lineTo(cx - w / 2, v1); p.lineTo(cx + w / 2, v1); p.lineTo(cx + w / 2, v0); p.lineTo(cx - w / 2, v0);
+                shape.holes.push(p);
+            };
+            [-7, 0, 7].forEach(d => addHole(d, 1.3, 0.02, 2.0));   // ドア
+            [-4, 4].forEach(w => addHole(w, 3.0, 0.9, 1.95));      // 窓
+            const g = new THREE.ShapeGeometry(shape);
+            g.rotateY(-s * Math.PI / 2); // 車内側に向ける
+            return g;
+        }
+
+        // ドアの扉（小窓つき）
+        function makeLeafGeo(s) {
+            const w = 0.325;
+            const shape = new THREE.Shape();
+            shape.moveTo(-w, 0); shape.lineTo(w, 0); shape.lineTo(w, 1.98); shape.lineTo(-w, 1.98); shape.lineTo(-w, 0);
+            const h = new THREE.Path();
+            h.moveTo(-0.22, 0.85); h.lineTo(-0.22, 1.7); h.lineTo(0.22, 1.7); h.lineTo(0.22, 0.85); h.lineTo(-0.22, 0.85);
+            shape.holes.push(h);
+            const g = new THREE.ShapeGeometry(shape);
+            g.rotateY(-s * Math.PI / 2);
+            return g;
+        }
+
+        function planeFacing(w, h, s) {
+            const g = new THREE.PlaneGeometry(w, h);
+            g.rotateY(-s * Math.PI / 2);
+            return g;
+        }
+
+        // 電車本体・内装の構築
+        function createTrainEnvironment() {
+            const root = new THREE.Group();
+            const W = CAR_WIDTH, L = CAR_LENGTH, HALF = W / 2, H = CAR_HEIGHT;
+
+            const wallGeo = { '-1': makeWallGeo(-1), '1': makeWallGeo(1) };
+            const leafGeo = { '-1': makeLeafGeo(-1), '1': makeLeafGeo(1) };
+            const floorGeo = new THREE.PlaneGeometry(W, L).rotateX(-Math.PI / 2);
+            const ceilGeo = new THREE.PlaneGeometry(W, L).rotateX(Math.PI / 2);
+            const ventGeo = new THREE.PlaneGeometry(0.9, L - 0.4).rotateX(Math.PI / 2);
+            const aoSeatGeo = new THREE.PlaneGeometry(0.9, 3.5).rotateX(-Math.PI / 2);
+            const aoBlobGeo = new THREE.PlaneGeometry(0.9, 0.9).rotateX(-Math.PI / 2);
+
+            let lcdIndex = 0;
+
+            for (let c = 0; c < CAR_COUNT; c++) {
+                const carZ = -c * CAR_LENGTH;
+
+                // 1. 床・天井・空調グリル
+                put(root, floorGeo, M.floor, [0, 0, carZ]);
+                put(root, ceilGeo, M.ceiling, [0, H, carZ]);
+                put(root, ventGeo, M.vent, [0, H - 0.01, carZ]);
+
+                // 2. 蛍光灯（LEDライン）
+                [-6, -2, 2, 6].forEach(z => {
+                    [-1, 1].forEach(sx => {
+                        put(root, boxG(0.16, 0.03, 3.4), M.led, [sx * 0.95, H - 0.02, carZ + z]);
+                    });
+                });
+
+                // 3. 吊り手のレールと吊り革
+                [-1, 1].forEach(sx => {
+                    put(root, cylG(0.015, 0.015, L - 0.6, 8), M.metal, [sx * 0.7, 2.22, carZ], [Math.PI / 2, 0, 0]);
+                    for (let z = -7.2; z <= 7.21; z += 0.8) {
+                        put(root, cylG(0.008, 0.008, 0.14, 6), M.belt, [sx * 0.7, 2.14, carZ + z]);
+                        put(root, ringGeo(), M.ring, [sx * 0.7, 1.97, carZ + z], [0, Math.PI / 2, 0]);
+                    }
+                });
+
+                // 4. 左右の壁・窓・ドア
+                [-1, 1].forEach(s => {
+                    const wx = (d) => s * (HALF - d);
+                    put(root, wallGeo[String(s)], M.wall, [s * HALF, 0, carZ]);
+
+                    // 山手線カラーのライン
+                    put(root, boxG(0.02, 0.04, L), M.stripe, [wx(0.01), 2.03, carZ]);
+
+                    // 窓まわり
+                    [-4, 4].forEach(wc => {
+                        put(root, boxG(0.05, 0.05, 3.1), M.frame, [wx(0.025), 1.975, carZ + wc]);
+                        put(root, boxG(0.14, 0.05, 3.1), M.frame, [wx(0.07), 0.915, carZ + wc]);
+                        [-1.5, 1.5].forEach(dz => {
+                            put(root, boxG(0.05, 1.1, 0.05), M.frame, [wx(0.025), 1.425, carZ + wc + dz]);
+                        });
+                        put(root, boxG(0.03, 1.05, 0.03), M.frame, [wx(0.02), 1.425, carZ + wc]);
+                        put(root, planeFacing(3.0, 1.05, s), M.glass, [wx(0.01), 1.425, carZ + wc]);
+                        // 窓上ポスター
+                        [-0.75, 0.75].forEach(dz => {
+                            put(root, planeFacing(1.3, 0.36, s), pick(M.ads), [wx(0.012), 2.27, carZ + wc + dz]);
+                        });
+                    });
+
+                    // ドア
+                    [-7, 0, 7].forEach((dz, di) => {
+                        const z = carZ + dz;
+                        [-0.325, 0.325].forEach(lz => {
+                            put(root, leafGeo[String(s)], M.door, [wx(0.04), 0.02, z + lz]);
+                            put(root, planeFacing(0.44, 0.85, s), M.glass, [wx(0.045), 1.295, z + lz]);
+                        });
+                        put(root, boxG(0.06, 0.05, 1.34), M.frame, [wx(0.03), 2.025, z]);
+                        [-0.67, 0.67].forEach(oz => {
+                            put(root, boxG(0.06, 2.0, 0.04), M.frame, [wx(0.03), 1.0, z + oz]);
+                        });
+                        put(root, boxG(0.03, 1.98, 0.02), M.doorDark, [wx(0.06), 1.0, z]);
+                        put(root, boxG(0.2, 0.03, 1.3), M.frame, [wx(0.1), 0.015, z]);
+                        // 車内案内表示器
+                        put(root, planeFacing(0.9, 0.22, s), M.lcd[c * 3 + di], [wx(0.012), 2.27, z]);
+
+                        // 判定用アンカー（位置のみ）
+                        const anchor = new THREE.Object3D();
+                        anchor.position.set(s * (HALF - 0.1), 0, z);
+                        trainGroup.add(anchor);
+                        registerObstacle(anchor, 'DOOR', 0.4, 1.2, 5);
+                    });
+
+                    // 網棚
+                    [-L / 4, L / 4].forEach(sz => {
+                        [1.4, 1.72].forEach(rx => {
+                            put(root, cylG(0.012, 0.012, 3.2, 6), M.metal, [s * rx, 1.9, carZ + sz], [Math.PI / 2, 0, 0]);
+                        });
+                        for (let z = -1.6; z <= 1.61; z += 0.4) {
+                            put(root, boxG(0.32, 0.014, 0.014), M.metal, [s * 1.56, 1.9, carZ + sz + z]);
+                        }
+                    });
+
+                    // 座席（ロングシート）＋ 座っている乗客
+                    [-L / 4, L / 4].forEach(sz => {
+                        const isPrio = (s > 0 && sz > 0);
+                        const seat = createSeatMesh(isPrio);
+                        seat.position.set(s * (HALF - 0.45), 0, carZ + sz);
+                        if (s > 0) seat.rotation.y = Math.PI;
+                        root.add(seat);
+
+                        const anchor = new THREE.Object3D();
+                        anchor.position.set(s * (HALF - 0.45), 0, carZ + sz);
+                        trainGroup.add(anchor);
+                        registerObstacle(anchor, 'SEAT', 0.8, 3.2, 3);
+
+                        // ステンレスの縦ポール（座席の端）
+                        [-1.8, 1.8].forEach(oz => {
+                            put(root, cylG(0.02, 0.02, H, 8), M.metal, [s * 1.1, H / 2, carZ + sz + oz]);
+                        });
+                    });
+                });
+
+                // 5. 乗客 NPC (ランダム配置)
+                const passengerCount = 3 + Math.floor(Math.random() * 3);
+                for (let p = 0; p < passengerCount; p++) {
+                    const px = (Math.random() - 0.5) * (CAR_WIDTH - 1.2);
+                    const pz = carZ + (Math.random() - 0.5) * (CAR_LENGTH - 3);
+                    const passenger = createPassengerMesh();
+                    passenger.position.set(px, 0, pz);
+                    passenger.rotation.y = Math.random() * Math.PI * 2;
+                    root.add(passenger);
+                    put(root, aoBlobGeo, M.ao, [px, 0.012, pz]);
+
+                    const anchor = new THREE.Object3D();
+                    anchor.position.set(px, 0, pz);
+                    trainGroup.add(anchor);
+                    registerObstacle(anchor, 'PASSENGER', 0.6, 0.6, 2);
+                }
+
+                // 床の接地影（座席の下）
+                [-1, 1].forEach(s => {
+                    [-L / 4, L / 4].forEach(sz => {
+                        put(root, aoSeatGeo, M.ao, [s * (HALF - 0.5), 0.012, carZ + sz]);
+                    });
+                });
+
+                // 6. 車両連結部の仕切り壁（中央に貫通路）
+                if (c < CAR_COUNT - 1) {
+                    const zb = carZ - CAR_LENGTH / 2;
+                    [-1, 1].forEach(sx => {
+                        put(root, boxG(1.2, H, 0.1), M.wall, [sx * 1.2, H / 2, zb]);
+                        put(root, boxG(0.06, 2.1, 0.14), M.frame, [sx * 0.6, 1.05, zb]);
+                    });
+                    put(root, boxG(1.2, H - 2.1, 0.1), M.wall, [0, (2.1 + H) / 2, zb]);
+                    put(root, boxG(1.26, 0.06, 0.14), M.frame, [0, 2.1, zb]);
+                    // 号車表示
+                    put(root, new THREE.PlaneGeometry(0.7, 0.175), M.signCar[c], [0, 2.3, zb + 0.056]);
+                }
+            }
+
+            // 先頭車の運転室側（スタート側）の壁
+            const frontZ = CAR_LENGTH / 2;
+            put(root, boxG(W, H, 0.1), M.wall, [0, H / 2, frontZ - 0.05]);
+            put(root, boxG(0.9, 1.95, 0.04), M.door, [0, 0.98, frontZ - 0.12]);
+            put(root, boxG(0.3, 0.4, 0.02), M.glass, [0, 1.45, frontZ - 0.145]);
+            put(root, boxG(0.04, 0.2, 0.05), M.metal, [0.32, 1.0, frontZ - 0.15]);
+            put(root, new THREE.PlaneGeometry(0.7, 0.175), M.signFront, [0, 2.25, frontZ - 0.115]).rotation.y = Math.PI;
+
+            // ゴール地点（一番後ろの5号車運転室のドア）
+            const goalZ = -(CAR_COUNT - 1) * CAR_LENGTH - CAR_LENGTH / 2 + 1;
+            put(root, boxG(W, H, 0.2), M.wall, [0, H / 2, goalZ]);
+            put(root, boxG(1.0, 2.0, 0.05), M.door, [0, 1.0, goalZ + 0.12]);
+            put(root, boxG(0.3, 0.4, 0.02), M.glass, [0, 1.45, goalZ + 0.15]);
+            put(root, boxG(0.04, 0.2, 0.05), M.metal, [0.36, 1.0, goalZ + 0.16]);
+            // 発光する緑の枠
+            put(root, boxG(0.08, 2.08, 0.08), M.jyGlow, [-0.58, 1.04, goalZ + 0.12]);
+            put(root, boxG(0.08, 2.08, 0.08), M.jyGlow, [0.58, 1.04, goalZ + 0.12]);
+            put(root, boxG(1.24, 0.08, 0.08), M.jyGlow, [0, 2.08, goalZ + 0.12]);
+            put(root, new THREE.PlaneGeometry(1.4, 0.35), M.signGoal, [0, 2.3, goalZ + 0.11]);
+            // ゴール前のグリーンマット
+            put(root, new THREE.PlaneGeometry(1.2, 1.8).rotateX(-Math.PI / 2), M.goalMat, [0, 0.014, goalZ + 1.1]);
+
+            // 静的メッシュを結合してシーンへ
+            trainGroup.add(bakeStatic(root));
+        }
+
+        function ringGeo() {
+            return _gc.ring || (_gc.ring = new THREE.TorusGeometry(0.045, 0.008, 6, 14));
+        }
+
+        // 座席メッシュ作成補助（座席は+X側が通路、-X側が壁）
+        function createSeatMesh(isPrio) {
+            const group = new THREE.Group();
+            const topMat = isPrio ? M.seatPrio : M.seatNormal;
+            const len = 3.2;
+
+            put(group, boxG(0.52, 0.28, len), M.seatBase, [-0.14, 0.14, 0]);
+            put(group, boxG(0.56, 0.12, len), M.seatSolid, [-0.12, 0.34, 0]);
+            put(group, boxG(0.04, 0.1, len), M.seatSolid, [0.17, 0.33, 0]);
+            const topG = _gc.seatTop || (_gc.seatTop = (() => {
+                const g = new THREE.PlaneGeometry(len, 0.56);
+                g.rotateX(-Math.PI / 2);
+                g.rotateY(Math.PI / 2);
+                return g;
+            })());
+            put(group, topG, topMat, [-0.12, 0.4005, 0]);
+
+            // 背もたれ（少し傾ける）
+            const back = new THREE.Group();
+            back.position.set(-0.34, 0.68, 0);
+            back.rotation.z = 0.1;
+            put(back, boxG(0.1, 0.52, len), M.seatSolid, [0, 0, 0]);
+            const backG = _gc.seatBack || (_gc.seatBack = (() => {
+                const g = new THREE.PlaneGeometry(len, 0.5);
+                g.rotateY(Math.PI / 2);
+                return g;
+            })());
+            put(back, backG, topMat, [0.0505, 0, 0]);
+            group.add(back);
+
+            // 端の仕切り板
+            [-1, 1].forEach(sz => {
+                const pg = _gc.seatPane || (_gc.seatPane = new THREE.PlaneGeometry(0.5, 0.75).rotateY(Math.PI / 2));
+                put(group, pg, M.glass, [-0.12, 0.85, sz * 1.62]);
+            });
+
+            // 座っている乗客
+            const slotW = len / 7;
+            for (let i = 0; i < 7; i++) {
+                if (Math.random() < 0.45) {
+                    const o = randomPassengerOpts();
+                    o.sit = true; o.skirt = false; o.coat = false;
+                    const hu = buildHuman(o);
+                    hu.group.position.set(-0.17, -0.44, -len / 2 + (i + 0.5) * slotW);
+                    hu.group.rotation.y = Math.PI / 2;
+                    hu.group.scale.setScalar(0.96 + Math.random() * 0.06);
+                    group.add(hu.group);
+                }
+            }
+            return group;
+        }
+
+        // ランダムな乗客の服装
+        function randomPassengerOpts() {
+            const female = Math.random() < 0.45;
+            return {
+                skin: pick([0xf1c9a5, 0xe8b996, 0xd9a47c, 0xf6d5b8, 0xc98f68]),
+                hair: pick([0x1b1613, 0x2a2018, 0x3b2a1e, 0x111111, 0x4a3b32, 0x8a8a8a]),
+                top: pick([0x2b3445, 0x3a3a3a, 0xb8c0cc, 0xf2f2ee, 0xc2564b, 0x5b8a72, 0xd9b45a, 0x6d7fa8, 0x8a5a44]),
+                bottom: pick([0x232a3a, 0x2f3338, 0x3f4a63, 0x1c1c1c, 0x6b5d4f]),
+                shoes: pick([0x1a1a1a, 0xdddddd, 0x5a4636]),
+                legs: pick([0xd9ab88, 0x1c1c1c, 0x2a2a35]),
+                female: female,
+                longHair: female && Math.random() < 0.7,
+                skirt: female && Math.random() < 0.4,
+                coat: Math.random() < 0.25,
+                longSleeve: Math.random() < 0.65,
+                phone: Math.random() < 0.5,
+                mask: Math.random() < 0.35,
+                bag: Math.random() < 0.4,
+                bagColor: pick([0x222222, 0x6b4f3a, 0x394a6b, 0x7a2f2f]),
+                sit: false
+            };
+        }
+
+        // 乗客メッシュ作成補助
+        function createPassengerMesh() {
+            const o = randomPassengerOpts();
+            const hu = buildHuman(o);
+            hu.group.scale.setScalar(0.95 + Math.random() * 0.08);
+            return hu.group;
+        }
+
+        // 人間モデル（足元が原点、前方が +Z）
+        function buildHuman(o) {
+            const g = new THREE.Group();
+            const rig = { legs: [], arms: [], elbows: [], head: null };
+            const skinM = cstd(o.skin, 0.65, 0);
+            const hairM = cstd(o.hair, 0.5, 0);
+            const topM = cstd(o.top, 0.85, 0);
+            const botM = cstd(o.bottom, 0.85, 0);
+            const shoeM = cstd(o.shoes, 0.55, 0);
+            const legM = o.skirt ? cstd(o.legs, 0.8, 0) : botM;
+            const eyeM = cstd(0x15110e, 0.4, 0);
+
+            // 脚
+            [-1, 1].forEach(sx => {
+                const leg = new THREE.Group();
+                leg.position.set(sx * 0.085, 0.9, 0);
+                g.add(leg);
+                if (o.sit) {
+                    put(leg, cylG(0.055, 0.07, 0.42, 10), legM, [0, 0, 0.21], [Math.PI / 2, 0, 0]);
+                    put(leg, cylG(0.056, 0.04, 0.42, 10), legM, [0, -0.21, 0.42]);
+                    put(leg, boxG(0.1, 0.07, 0.26), shoeM, [0, -0.435, 0.5]);
+                } else {
+                    put(leg, cylG(0.07, 0.05, 0.84, 10), legM, [0, -0.43, 0]);
+                    put(leg, boxG(0.1, 0.07, 0.27), shoeM, [0, -0.865, 0.05]);
+                }
+                rig.legs.push(leg);
+            });
+
+            // 腰・胴体
+            if (o.skirt) {
+                put(g, cylG(0.165, 0.215, 0.4, 14), botM, [0, 0.78, 0], null, [1, 1, 0.72]);
+            } else {
+                put(g, cylG(0.165, 0.16, 0.18, 12), botM, [0, 0.92, 0], null, [1, 1, 0.66]);
+            }
+            put(g, cylG(0.175, 0.15, 0.58, 14), topM, [0, 1.2, 0], null, [1, 1, 0.62]);
+            if (o.coat && !o.sit) {
+                put(g, cylG(0.152, 0.2, 0.42, 14), topM, [0, 0.78, 0], null, [1, 1, 0.7]);
+            }
+
+            // 腕
+            [-1, 1].forEach(sx => {
+                put(g, sphG(0.068, 10, 8), topM, [sx * 0.185, 1.46, 0], null, [1, 0.9, 0.9]);
+                const arm = new THREE.Group();
+                arm.position.set(sx * 0.205, 1.46, 0);
+                arm.rotation.z = sx * 0.05;
+                g.add(arm);
+                put(arm, cylG(0.043, 0.037, 0.3, 10), topM, [0, -0.15, 0]);
+                const el = new THREE.Group();
+                el.position.set(0, -0.3, 0);
+                arm.add(el);
+                put(el, cylG(0.036, 0.03, 0.27, 10), o.longSleeve ? topM : skinM, [0, -0.135, 0]);
+                put(el, sphG(0.032, 8, 6), skinM, [0, -0.285, 0]);
+                rig.arms.push(arm);
+                rig.elbows.push(el);
+            });
+
+            // ポーズ
+            if (o.sit) {
+                rig.arms.forEach(a => a.rotation.x = -0.3);
+                rig.elbows.forEach(e => e.rotation.x = -1.1);
+            }
+            if (o.phone) {
+                const a = rig.arms[1], e = rig.elbows[1];
+                a.rotation.x = -0.45;
+                e.rotation.x = -1.5;
+                put(e, boxG(0.07, 0.15, 0.012), cstd(0x15171a, 0.3, 0.2), [0, -0.29, 0.03]);
+                put(e, boxG(0.06, 0.13, 0.002), M.phoneScreen, [0, -0.29, 0.037]);
+            }
+
+            // 首と頭
+            put(g, cylG(0.048, 0.052, 0.1, 10), skinM, [0, 1.53, 0]);
+            const headG = new THREE.Group();
+            headG.position.set(0, 1.56, 0);
+            g.add(headG);
+            rig.head = headG;
+            put(headG, sphG(0.105, 16, 12), skinM, [0, 0.08, 0], null, [0.9, 1.12, 1.0]);
+            put(headG, sphG(0.113, 16, 12), hairM, [0, 0.105, -0.02], null, [1, 0.88, 1]);
+            if (o.longHair) {
+                put(headG, sphG(0.11, 12, 10), hairM, [0, -0.04, -0.075], null, [1, 1.6, 0.85]);
+            }
+            [-1, 1].forEach(sx => {
+                put(headG, sphG(0.011, 6, 5), eyeM, [sx * 0.037, 0.095, 0.1]);
+            });
+            if (o.mask) {
+                put(headG, boxG(0.11, 0.065, 0.035), cstd(0xf4f4f2, 0.8, 0), [0, 0.035, 0.088]);
+            }
+            if (o.sit && o.phone) headG.rotation.x = 0.25;
+
+            // 帽子（プレイヤー用）
+            if (o.cap) {
+                const capM = cstd(o.capColor, 0.7, 0);
+                const crown = _gc.capCrown || (_gc.capCrown = new THREE.SphereGeometry(0.116, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2));
+                put(headG, crown, capM, [0, 0.12, 0], null, [1, 0.9, 1.05]);
+                put(headG, boxG(0.15, 0.012, 0.1), capM, [0, 0.115, 0.13], [0.12, 0, 0]);
+            }
+
+            // バッグ類
+            if (o.backpack) {
+                put(g, boxG(0.3, 0.38, 0.16), cstd(o.bagColor, 0.8, 0), [0, 1.22, -0.175]);
+            } else if (o.bag && !o.sit) {
+                put(g, boxG(0.1, 0.22, 0.26), cstd(o.bagColor, 0.8, 0), [0.26, 0.98, 0]);
+            }
+
+            if (o.sit) g.position.y = 0; // 位置は呼び出し側で調整
+            return { group: g, rig: rig };
+        }
+
+        // 障害物の登録
+        function registerObstacle(mesh, type, width, depth, stunTime) {
+            obstacles.push({
+                mesh: mesh,
+                type: type,
+                width: width,
+                depth: depth,
+                stunTime: stunTime,
+                isColliding: false // 離脱判定フラグ
+            });
+        }
+
+        // 窓の外の夜景（スクロールして走行感を出す）
+        function createOutside() {
+            const planeW = TOTAL_LENGTH + 60;
+            const cz = -(CAR_COUNT - 1) * CAR_LENGTH / 2;
+            const HALF = CAR_WIDTH / 2;
+            const farBase = makeCityTex(1024, 512);
+            const nearBase = makeNearTex(512, 256);
+
+            [-1, 1].forEach(s => {
+                const farTex = s < 0 ? farBase : farBase.clone();
+                farTex.wrapS = THREE.RepeatWrapping;
+                farTex.repeat.set(planeW / 30, 1);
+                farTex.needsUpdate = true;
+                const farGeo = new THREE.PlaneGeometry(planeW, 14);
+                farGeo.rotateY(-s * Math.PI / 2);
+                const far = new THREE.Mesh(farGeo, new THREE.MeshBasicMaterial({ map: farTex, fog: false, toneMapped: false }));
+                far.position.set(s * (HALF + 6), 3, cz);
+                trainGroup.add(far);
+                outsideLayers.push({ tex: farTex, dir: s, period: 30, speed: 5 });
+
+                const nearTex = s < 0 ? nearBase : nearBase.clone();
+                nearTex.wrapS = THREE.RepeatWrapping;
+                nearTex.repeat.set(planeW / 14, 1);
+                nearTex.needsUpdate = true;
+                const nearGeo = new THREE.PlaneGeometry(planeW, 6);
+                nearGeo.rotateY(-s * Math.PI / 2);
+                const near = new THREE.Mesh(nearGeo, new THREE.MeshBasicMaterial({ map: nearTex, transparent: true, fog: false, toneMapped: false, depthWrite: false }));
+                near.position.set(s * (HALF + 2.2), 1.5, cz);
+                trainGroup.add(near);
+                outsideLayers.push({ tex: nearTex, dir: s, period: 14, speed: 16 });
+            });
+        }
+
+        // 人間プレイヤーの作成
+        function createPlayer() {
+            playerGroup = new THREE.Group();
+
+            const hu = buildHuman({
+                skin: 0xf0c8a3, hair: 0x1c1612, top: 0x0ea5e9, bottom: 0x1f2937, shoes: 0xf3f4f6,
+                legs: 0x1f2937, longSleeve: true, cap: true, capColor: 0xe11d48,
+                backpack: true, bagColor: 0xf59e0b, sit: false, skirt: false, coat: false, phone: false, mask: false
+            });
+            playerBody = hu.group;
+            playerRig = hu.rig;
+            playerGroup.add(playerBody);
+
+            // 足元の接地影
+            const shadow = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.9).rotateX(-Math.PI / 2), M.ao);
+            shadow.position.y = 0.012;
+            shadow.renderOrder = 2;
+            playerGroup.add(shadow);
+
+            playerGroup.position.set(player.x, 0, player.z);
+            trainGroup.add(playerGroup);
+        }
+
+        // プレイヤーの見た目更新（向き・歩行アニメ）
+        function updatePlayerVisual(now, dt) {
+            playerGroup.position.set(player.x, 0, player.z);
+
+            const moving = currentState === GAME_STATE.PLAYING && !isStunned && (input.moveX !== 0 || input.moveY !== 0);
+            if (moving) {
+                const moveAngle = Math.atan2(-input.moveX, -input.moveY);
+                const target = player.rotationY + moveAngle;
+                let diff = target - playerFacing;
+                diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+                playerFacing += diff * Math.min(1, dt * 12);
+                const mag = Math.min(1, Math.hypot(input.moveX, input.moveY));
+                walkPhase += dt * 10 * (0.5 + mag * 0.7);
+            }
+            playerGroup.rotation.y = playerFacing;
+
+            const amp = moving ? 0.7 : 0;
+            const sw = Math.sin(walkPhase) * amp;
+            playerRig.legs[0].rotation.x = sw;
+            playerRig.legs[1].rotation.x = -sw;
+            playerRig.arms[0].rotation.x = -sw * 0.8;
+            playerRig.arms[1].rotation.x = sw * 0.8;
+            playerRig.elbows[0].rotation.x = -0.25 * (moving ? 1 : 0.2);
+            playerRig.elbows[1].rotation.x = -0.25 * (moving ? 1 : 0.2);
+            playerBody.position.y = moving ? Math.abs(Math.sin(walkPhase)) * 0.025 : 0;
+
+            // 接触して動けないときはふらつく
+            if (isStunned) {
+                playerRig.head.rotation.z = Math.sin(now * 0.012) * 0.25;
+                playerBody.rotation.x = -0.12;
+            } else {
+                playerRig.head.rotation.z *= 0.8;
+                playerBody.rotation.x = 0;
+            }
+        }
+
+        // UI & タッチイベント設定
+        function setupUIAndInputs() {
+            // ボタン関係
+            document.getElementById('start-btn').addEventListener('click', startGame);
+            document.getElementById('restart-btn').addEventListener('click', resetGame);
+
+            // 1. 左手バーチャルジョイスティック
+            const joystickZone = document.getElementById('joystick-zone');
+            const joystickKnob = document.getElementById('joystick-knob');
+            let joystickTouchId = null;
+            let center = { x: 0, y: 0 };
+
+            joystickZone.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (joystickTouchId !== null) return;
+                const touch = e.changedTouches[0];
+                joystickTouchId = touch.identifier;
+
+                const rect = joystickZone.getBoundingClientRect();
+                center = {
+                    x: rect.left + rect.width / 2,
+                    y: rect.top + rect.height / 2
+                };
+                updateJoystick(touch.clientX, touch.clientY);
+            }, { passive: false });
+
+            window.addEventListener('touchmove', (e) => {
+                if (joystickTouchId === null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === joystickTouchId) {
+                        updateJoystick(e.changedTouches[i].clientX, e.changedTouches[i].clientY);
+                        break;
+                    }
+                }
+            }, { passive: false });
+
+            const endJoystick = (e) => {
+                if (joystickTouchId === null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === joystickTouchId) {
+                        joystickTouchId = null;
+                        input.moveX = 0;
+                        input.moveY = 0;
+                        joystickKnob.style.transform = `translate(-50%, -50%)`;
+                        break;
+                    }
+                }
+            };
+            window.addEventListener('touchend', endJoystick);
+            window.addEventListener('touchcancel', endJoystick);
+
+            function updateJoystick(clientX, clientY) {
+                const maxRadius = 45;
+                let dx = clientX - center.x;
+                let dy = clientY - center.y;
+                const dist = Math.hypot(dx, dy);
+
+                if (dist > maxRadius) {
+                    dx = (dx / dist) * maxRadius;
+                    dy = (dy / dist) * maxRadius;
+                }
+
+                joystickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+                input.moveX = dx / maxRadius;
+                input.moveY = dy / maxRadius;
+            }
+
+            // 2. 右手画面スワイプ（カメラ視点操作）
+            const lookZone = document.getElementById('touch-look-zone');
+
+            lookZone.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                if (input.touchLookId !== null) return;
+                const touch = e.changedTouches[0];
+                input.touchLookId = touch.identifier;
+                input.lastTouchX = touch.clientX;
+                input.lastTouchY = touch.clientY;
+            }, { passive: false });
+
+            window.addEventListener('touchmove', (e) => {
+                if (input.touchLookId === null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === input.touchLookId) {
+                        const touch = e.changedTouches[i];
+                        const dx = touch.clientX - input.lastTouchX;
+                        // 視点回転速度
+                        player.rotationY -= dx * 0.008;
+                        input.lastTouchX = touch.clientX;
+                        input.lastTouchY = touch.clientY;
+                        break;
+                    }
+                }
+            }, { passive: false });
+
+            const endLook = (e) => {
+                if (input.touchLookId === null) return;
+                for (let i = 0; i < e.changedTouches.length; i++) {
+                    if (e.changedTouches[i].identifier === input.touchLookId) {
+                        input.touchLookId = null;
+                        break;
+                    }
+                }
+            };
+            window.addEventListener('touchend', endLook);
+            window.addEventListener('touchcancel', endLook);
+        }
+
+        // ゲームスタート
+        function startGame() {
+            document.getElementById('start-modal').classList.add('hidden');
+            currentState = GAME_STATE.PLAYING;
+            startTime = performance.now();
+        }
+
+        // リセット
+        function resetGame() {
+            document.getElementById('result-modal').classList.add('hidden');
+            player.x = 0;
+            player.z = CAR_LENGTH / 2 - 2;
+            player.rotationY = Math.PI;
+            playerFacing = Math.PI;
+            isStunned = false;
+            stunEndTime = 0;
+            document.getElementById('stun-banner').classList.add('hidden');
+            document.body.classList.remove('stunned-overlay');
+
+            // 障害物フラグの初期化
+            obstacles.forEach(o => o.isColliding = false);
+
+            currentState = GAME_STATE.PLAYING;
+            startTime = performance.now();
+        }
+
+        // メインゲームループ
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const now = performance.now();
+            const dt = lastFrame ? Math.min(0.05, (now - lastFrame) / 1000) : 0.016;
+            lastFrame = now;
+
+            if (currentState === GAME_STATE.PLAYING) {
+                // タイマー更新
+                elapsedTime = (now - startTime) / 1000;
+                updateTimerUI(elapsedTime);
+
+                // 電車の揺れ・傾き制御
+                updateTrainTilt(now);
+
+                // スタン判定・解除処理
+                if (isStunned) {
+                    if (now >= stunEndTime) {
+                        isStunned = false;
+                        document.getElementById('stun-banner').classList.add('hidden');
+                        document.body.classList.remove('stunned-overlay');
+                    }
+                } else {
+                    // プレイヤー移動更新
+                    updatePlayerMovement();
+                }
+
+                // 衝突判定
+                checkCollisions(now);
+
+                // ゴール判定
+                checkGoal();
+            }
+
+            // 窓の外の景色を流す
+            for (let i = 0; i < outsideLayers.length; i++) {
+                const L = outsideLayers[i];
+                L.tex.offset.x += (L.dir < 0 ? -1 : 1) * (L.speed * dt) / L.period;
+            }
+
+            // 車内灯をプレイヤーに追従
+            lightRig.position.z = player.z;
+
+            // プレイヤー表示更新
+            updatePlayerVisual(now, dt);
+
+            // カメラ追従
+            updateCamera();
+
+            // レンダリング
+            renderer.render(scene, camera);
+        }
+
+        // タイマーUI更新
+        function updateTimerUI(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            const millis = Math.floor((seconds % 1) * 100);
+            document.getElementById('timer-display').innerText = 
+                `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${millis.toString().padStart(2, '0')}`;
+
+            // 現在地（車両）計算
+            const currentCar = Math.min(CAR_COUNT, Math.max(1, Math.floor((-player.z + CAR_LENGTH / 2) / CAR_LENGTH) + 1));
+            document.getElementById('car-display').innerText = `${currentCar}号車 / ${CAR_COUNT}両${currentCar === 1 ? '（先頭車）' : currentCar === CAR_COUNT ? '（最後尾）' : ''}`;
+        }
+
+        // 電車のランダムな傾き処理
+        function updateTrainTilt(now) {
+            if (now > tiltTimer) {
+                // 3〜6秒ごとに傾きを変更
+                tiltTimer = now + 3000 + Math.random() * 3000;
+                // -0.12 ~ +0.12 ラジアン（約7度）の傾き
+                targetTilt = (Math.random() - 0.5) * 0.25;
+
+                const warning = document.getElementById('tilt-warning');
+                if (Math.abs(targetTilt) > 0.05) {
+                    warning.classList.remove('opacity-0');
+                } else {
+                    warning.classList.add('opacity-0');
+                }
+            }
+
+            // 滑らかに傾ける
+            trainTilt += (targetTilt - trainTilt) * 0.03;
+            trainGroup.rotation.z = trainTilt;
+
+            // 電車の傾きによってプレイヤーを滑らせる物理効果
+            if (currentState === GAME_STATE.PLAYING && !isStunned) {
+                player.x -= trainTilt * 0.05;
+            }
+        }
+
+        // プレイヤーの移動
+        function updatePlayerMovement() {
+            if (input.moveX === 0 && input.moveY === 0) return;
+
+            // カメラ／プレイヤーの向きに基づいた移動計算
+            const moveAngle = Math.atan2(-input.moveX, -input.moveY);
+            const totalAngle = player.rotationY + moveAngle;
+
+            const moveSpeed = player.speed;
+            const newX = player.x + Math.sin(totalAngle) * moveSpeed;
+            let newZ = player.z + Math.cos(totalAngle) * moveSpeed;
+
+            // 車内壁との衝突制限 (X軸: 幅制限)
+            const maxX = CAR_WIDTH / 2 - player.radius - 0.1;
+            player.x = Math.max(-maxX, Math.min(maxX, newX));
+
+            // 車両間の仕切り壁：中央の貫通路だけ通れる
+            for (let c = 0; c < CAR_COUNT - 1; c++) {
+                const zb = -c * CAR_LENGTH - CAR_LENGTH / 2;
+                if ((player.z - zb) * (newZ - zb) < 0 && Math.abs(player.x) > 0.5) {
+                    newZ = player.z;
+                }
+            }
+
+            // Z軸制限 (先端〜最後尾)
+            const minZ = -(CAR_COUNT - 1) * CAR_LENGTH - CAR_LENGTH / 2 + 0.5;
+            const maxZ = CAR_LENGTH / 2 - 0.5;
+            player.z = Math.max(minZ, Math.min(maxZ, newZ));
+        }
+
+        // 障害物との衝突判定
+        function checkCollisions(now) {
+            const px = player.x;
+            const pz = player.z;
+            const pr = player.radius;
+
+            obstacles.forEach(obs => {
+                // 障害物の位置（電車内のローカル座標）
+                const ox = obs.mesh.position.x;
+                const oz = obs.mesh.position.z;
+
+                const halfW = obs.width / 2;
+                const halfD = obs.depth / 2;
+
+                // AABB vs 円（プレイヤー）の接触判定
+                const closeX = Math.max(ox - halfW, Math.min(px, ox + halfW));
+                const closeZ = Math.max(oz - halfD, Math.min(pz, oz + halfD));
+
+                const distX = px - closeX;
+                const distZ = pz - closeZ;
+                const distance = Math.hypot(distX, distZ);
+
+                if (distance < pr) {
+                    // 接触中
+                    if (!obs.isColliding) {
+                        // 一度離れてから初めて触れた時だけヒット判定！
+                        obs.isColliding = true;
+
+                        // スタン発生
+                        triggerStun(obs.type, obs.stunTime, now);
+                    }
+                } else {
+                    // 離れた場合、フラグを解除して次回接触可能に
+                    obs.isColliding = false;
+                }
+            });
+        }
+
+        // スタン（動けない）発動
+        function triggerStun(type, seconds, now) {
+            isStunned = true;
+            stunEndTime = now + seconds * 1000;
+
+            const banner = document.getElementById('stun-banner');
+            const text = document.getElementById('stun-text');
+
+            let name = '障害物';
+            if (type === 'SEAT') name = '座席';
+            if (type === 'PASSENGER') name = '乗客';
+            if (type === 'DOOR') name = 'ドア・壁';
+
+            text.innerText = `${name}に接触！${seconds}秒停止！`;
+            banner.classList.remove('hidden');
+            document.body.classList.add('stunned-overlay');
+        }
+
+        // ゴール判定
+        function checkGoal() {
+            const goalZ = -(CAR_COUNT - 1) * CAR_LENGTH - CAR_LENGTH / 2 + 1.2;
+            if (player.z <= goalZ) {
+                currentState = GAME_STATE.GAMEOVER;
+
+                // リザルト画面表示
+                const finalMins = Math.floor(elapsedTime / 60);
+                const finalSecs = Math.floor(elapsedTime % 60);
+                const finalMillis = Math.floor((elapsedTime % 1) * 100);
+                document.getElementById('final-time').innerText = 
+                    `${finalMins.toString().padStart(2, '0')}:${finalSecs.toString().padStart(2, '0')}.${finalMillis.toString().padStart(2, '0')}`;
+
+                document.getElementById('result-modal').classList.remove('hidden');
+            }
+        }
+
+        // カメラ更新（三人称視点）
+        function updateCamera() {
+            // 電車の傾きに対応したカメラ位置の補正
+            const camOffsetDist = 2.2;
+            const camHeight = 1.8;
+
+            // プレイヤーの後ろにカメラを配置
+            const camX = player.x - Math.sin(player.rotationY) * camOffsetDist;
+            const camZ = player.z - Math.cos(player.rotationY) * camOffsetDist;
+
+            // 電車の回転を反映したポジション
+            const localPos = new THREE.Vector3(camX, camHeight, camZ);
+            localPos.applyAxisAngle(new THREE.Vector3(0, 0, 1), trainTilt);
+
+            camera.position.set(localPos.x, localPos.y, localPos.z);
+
+            // 視線ターゲット
+            const targetX = player.x + Math.sin(player.rotationY) * 2;
+            const targetZ = player.z + Math.cos(player.rotationY) * 2;
+            const targetPos = new THREE.Vector3(targetX, 1.2, targetZ);
+            targetPos.applyAxisAngle(new THREE.Vector3(0, 0, 1), trainTilt);
+
+            camera.lookAt(targetPos);
+        }
+
+        // ウィンドウサイズ変更
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
